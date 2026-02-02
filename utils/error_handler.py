@@ -1,7 +1,4 @@
-"""
-에러 처리 유틸리티
-"""
-import time
+import asyncio
 import logging
 from typing import Callable, Any
 from functools import wraps
@@ -59,22 +56,22 @@ def retry_on_error(max_retries: int = MAX_RETRIES, delay: int = RETRY_DELAY):
                     logger.error(f"API 키 에러: {str(e)}")
                     raise
                 except RateLimitError as e:
-                    # 속도 제한은 더 긴 대기 시간 적용
+                    # 속도 제한은 더 긴 대기 시간 적용 (지수 백오프)
                     wait_time = delay * (2 ** attempt)
                     logger.warning(f"속도 제한 도달. {wait_time}초 후 재시도... (시도 {attempt + 1}/{max_retries + 1})")
                     if attempt < max_retries:
-                        time.sleep(wait_time)
+                        await asyncio.sleep(wait_time)
                     last_exception = e
                 except (TimeoutError, InvalidResponseError) as e:
                     logger.warning(f"에러 발생: {str(e)}. 재시도 중... (시도 {attempt + 1}/{max_retries + 1})")
                     if attempt < max_retries:
-                        time.sleep(delay)
+                        await asyncio.sleep(delay)
                     last_exception = e
                 except Exception as e:
                     logger.error(f"예상치 못한 에러: {str(e)}")
                     last_exception = e
                     if attempt < max_retries:
-                        time.sleep(delay)
+                        await asyncio.sleep(delay)
             
             # 모든 재시도 실패
             logger.error(f"최대 재시도 횟수 초과. 마지막 에러: {str(last_exception)}")

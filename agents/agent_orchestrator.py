@@ -2,7 +2,7 @@
 에이전트 오케스트레이터 - 9개 에이전트 병렬 실행
 """
 import asyncio
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Callable
 import time
 import logging
 
@@ -28,27 +28,32 @@ class AgentOrchestrator:
         """
         self.api_keys = api_keys
     
-    async def run_all_agents(self, prompt: str) -> Dict[str, Any]:
+    async def run_all_agents(self, prompt: Any, status_callback: Callable = None, total_fields: int = 0) -> Dict[str, Any]:
         """
         9개 에이전트를 병렬로 실행
         
         Args:
-            prompt: 추출 프롬프트
+            prompt: 추출 프롬프트 (문자열 또는 {"default": "...", "google": "..."} 딕셔너리)
+            status_callback: 상태 업데이트 콜백 함수 (agent_id, provider, status, message)
+            total_fields: 전체 추출 항목 수
             
         Returns:
-            {
-                "openai_results": [result1, result2, result3],
-                "anthropic_results": [result1, result2, result3],
-                "google_results": [result1, result2, result3],
-                "execution_info": {...}
-            }
+            ...
         """
         logger.info("=" * 60)
-        logger.info("9개 에이전트 병렬 실행 시작")
+        logger.info(f"9개 에이전트 병렬 실행 시작 (항목 수: {total_fields})")
         logger.info("=" * 60)
         
         start_time = time.time()
         
+        # 호출 인자 정의
+        if isinstance(prompt, dict):
+            default_prompt = prompt.get("default", "")
+            google_prompt = prompt.get("google", default_prompt)
+        else:
+            default_prompt = prompt
+            google_prompt = prompt
+
         # 각 모델별 에이전트 생성
         tasks = []
         agent_info = []
@@ -57,25 +62,24 @@ class AgentOrchestrator:
         if self.api_keys.get("openai"):
             for i in range(1, AGENTS_PER_MODEL + 1):
                 client = OpenAIClient(self.api_keys["openai"], OPENAI_MODEL, i)
-                tasks.append(self._run_single_agent(client, prompt))
+                tasks.append(self._run_single_agent(client, default_prompt, status_callback, total_fields))
                 agent_info.append({"provider": "OpenAI", "agent_id": i})
         
         # Anthropic 에이전트 3개
         if self.api_keys.get("anthropic"):
             for i in range(1, AGENTS_PER_MODEL + 1):
                 client = AnthropicClient(self.api_keys["anthropic"], ANTHROPIC_MODEL, i)
-                tasks.append(self._run_single_agent(client, prompt))
+                tasks.append(self._run_single_agent(client, default_prompt, status_callback, total_fields))
                 agent_info.append({"provider": "Anthropic", "agent_id": i})
         
         # Google 에이전트 3개
         if self.api_keys.get("google"):
             for i in range(1, AGENTS_PER_MODEL + 1):
                 client = GoogleClient(self.api_keys["google"], GOOGLE_MODEL, i)
-                tasks.append(self._run_single_agent(client, prompt))
+                tasks.append(self._run_single_agent(client, google_prompt, status_callback, total_fields))
                 agent_info.append({"provider": "Google", "agent_id": i})
         
         # 병렬 실행
-        logger.info(f"총 {len(tasks)}개 에이전트 실행 중...")
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         # 결과 분류
@@ -84,23 +88,28 @@ class AgentOrchestrator:
         google_results = []
         errors = []
         
-        for i, (result, info) in enumerate(zip(results, agent_info)):
-            if isinstance(result, Exception):
+        for i, (res, info) in enumerate(zip(results, agent_info)):
+            if isinstance(res, Exception):
                 error_info = {
                     "provider": info["provider"],
                     "agent_id": info["agent_id"],
-                    "error": str(result),
-                    "error_message": get_user_friendly_error_message(result)
+                    "error": str(res),
+                    "error_message": get_user_friendly_error_message(res)
                 }
                 errors.append(error_info)
-                logger.error(f"[{info['provider']}-{info['agent_id']}] 실패: {str(result)}")
+                # 실패 콜백
+                if status_callback:
+                    status_callback(info['agent_id'], info['provider'], "error", error_info["error_message"])
             else:
                 if info["provider"] == "OpenAI":
-                    openai_results.append(result)
+                    openai_results.append(res)
                 elif info["provider"] == "Anthropic":
-                    anthropic_results.append(result)
+                    anthropic_results.append(res)
                 elif info["provider"] == "Google":
-                    google_results.append(result)
+                    google_results.append(res)
+                # 성공 콜백
+                if status_callback:
+                    status_callback(info['agent_id'], info['provider'], "success", "완료 (100%)")
         
         end_time = time.time()
         execution_time = end_time - start_time
@@ -129,25 +138,46 @@ class AgentOrchestrator:
             "execution_info": execution_info
         }
     
-    async def _run_single_agent(self, client, prompt: str) -> Dict[str, Any]:
+    async def _run_single_agent(self, client, prompt: str, status_callback: Callable = None, total_fields: int = 0) -> Dict[str, Any]:
         """
-        단일 에이전트 실행
+        단일 에이전트 실행 (순차적 시작 적용 및 스트리밍 진행률 보고)
         
         Args:
             client: LLM 클라이언트
             prompt: 추출 프롬프트
+            status_callback: 상태 업데이트 콜백
+            total_fields: 전체 추출 항목 수
             
         Returns:
-            {
-                "agent_info": {...},
-                "data": {...},
-                "execution_time": 1.23
-            }
+            ...
         """
+        # 에이전트 간 시작 간격을 두어 속도 제한 예방 (Staggered Start)
+        if client.provider == "Anthropic":
+            # Anthropic은 TPM(분당 토큰) 제한이 엄격하므로 15초 단위로 띄움 (총 30~45초 분산)
+            offset = 5 + (client.agent_id - 1) * 15
+        else:
+            # OpenAI, Google은 상대적으로 넉넉하므로 1.5초 간격 유지
+            provider_offsets = {"OpenAI": 0, "Google": 3}
+            offset = provider_offsets.get(client.provider, 0) + (client.agent_id * 1.5)
+        
+        if offset > 0:
+            if status_callback:
+                status_callback(client.agent_id, client.provider, "waiting", f"대기 중 ({int(offset)}초)")
+            await asyncio.sleep(offset)
+
+        if status_callback:
+            status_callback(client.agent_id, client.provider, "running", "분석 시작 (0%)")
+            
+        # 내부 진행률 보고용 콜백 정의
+        def handle_client_progress(percentage):
+            if status_callback:
+                status_callback(client.agent_id, client.provider, "running", f"분석 중 ({percentage}%)")
+
         start_time = time.time()
         
         try:
-            data = await client.extract_data(prompt)
+            # 스트리밍 및 진행률 보고 지원하는 extract_data 호출
+            data = await client.extract_data(prompt, total_fields=total_fields, progress_callback=handle_client_progress)
             execution_time = time.time() - start_time
             
             return {
@@ -158,4 +188,4 @@ class AgentOrchestrator:
             }
         except Exception as e:
             # 예외를 다시 발생시켜 gather에서 처리
-            raise
+            raise e

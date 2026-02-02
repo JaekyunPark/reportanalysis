@@ -2,7 +2,7 @@
 Anthropic API 클라이언트
 """
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Callable
 import logging
 
 from anthropic import AsyncAnthropic
@@ -26,39 +26,46 @@ class AnthropicClient(BaseLLMClient):
         self.client = AsyncAnthropic(api_key=api_key)
     
     @retry_on_error()
-    async def extract_data(self, prompt: str) -> Dict[str, Any]:
+    async def extract_data(self, prompt: str, total_fields: int = 0, progress_callback: Callable = None) -> Dict[str, Any]:
         """
-        Anthropic API를 사용하여 데이터 추출
+        Anthropic API를 사용하여 데이터 추출 (스트리밍 적용)
         
         Args:
             prompt: 추출 프롬프트
+            total_fields: 전체 추출 항목 수
+            progress_callback: 진행 상태보고 콜백
             
         Returns:
             추출된 데이터 딕셔너리
         """
-        try:
-            logger.info(f"[{self.get_agent_info()['full_name']}] 데이터 추출 시작...")
-            
-            # Claude에게 JSON 형식 요청 추가
-            enhanced_prompt = f"{prompt}\n\n반드시 순수한 JSON 형식으로만 응답하세요. 다른 설명이나 텍스트 없이 JSON만 출력하세요."
-            
-            response = await asyncio.wait_for(
-                self.client.messages.create(
+            # 스트리밍 요청 및 처리 전체를 타임아웃으로 감싸기
+            async def process_anthropic_stream():
+                full_text_local = ""
+                last_progress_local = 0
+                
+                async with self.client.messages.stream(
                     model=self.model_name,
                     max_tokens=4096,
-                    temperature=0.1,  # 일관성을 위해 낮은 temperature
+                    temperature=0.1,
                     messages=[
                         {
                             "role": "user",
                             "content": enhanced_prompt
                         }
                     ]
-                ),
-                timeout=API_TIMEOUT
-            )
-            
-            result_text = response.content[0].text
-            result_data = self.parse_json_response(result_text)
+                ) as stream:
+                    async for text in stream.text_stream:
+                        full_text_local += text
+                        # 진행률 계산 및 콜백 호출
+                        if total_fields > 0 and progress_callback:
+                            current_progress = self.calculate_progress(full_text_local, total_fields)
+                            if current_progress > last_progress_local:
+                                progress_callback(current_progress)
+                                last_progress_local = current_progress
+                return full_text_local
+
+            full_text = await asyncio.wait_for(process_anthropic_stream(), timeout=API_TIMEOUT)
+            result_data = self.parse_json_response(full_text)
             
             logger.info(f"[{self.get_agent_info()['full_name']}] 데이터 추출 완료")
             

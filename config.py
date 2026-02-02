@@ -5,13 +5,13 @@
 # 모델 설정
 OPENAI_MODEL = "gpt-5.2"
 ANTHROPIC_MODEL = "claude-sonnet-4-5"
-GOOGLE_MODEL = "gemini-3-pro-preview"
+GOOGLE_MODEL = "gemini-3-flash-preview"
 
 # 각 모델별 에이전트 수
 AGENTS_PER_MODEL = 3
 
 # API 설정
-API_TIMEOUT = 60  # 초
+API_TIMEOUT = 300  # 초 (긴 보고서 분석을 위해 연장)
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # 초
 

@@ -5,6 +5,8 @@
 import streamlit as st
 import asyncio
 import os
+import json
+import pandas as pd
 from pathlib import Path
 
 from data_processing import ExcelParser, ReportLoader, PromptBuilder
@@ -167,15 +169,61 @@ with tab1:
                         st.success(f"✅ 보고서 로드 완료: {len(report_text)} 문자")
                     
                     with st.spinner("🔨 추출 프롬프트 생성 중..."):
-                        prompt = PromptBuilder.build_extraction_prompt(schema, report_text)
-                        st.success("✅ 프롬프트 생성 완료")
+                        # 모델별 프롬프트 분리 생성
+                        default_prompt = PromptBuilder.build_extraction_prompt(schema, report_text, model_type="default")
+                        google_prompt = PromptBuilder.build_extraction_prompt(schema, report_text, model_type="google")
+                        
+                        prompts = {
+                            "default": default_prompt,
+                            "google": google_prompt
+                        }
+                        st.success("✅ 모델별 최적화 프롬프트 생성 완료")
                     
                     with st.spinner("🤖 9개 에이전트 실행 중... (시간이 소요될 수 있습니다)"):
+                        # 실시간 진행 상황 표시를 위한 컨테이너
+                        progress_container = st.container()
+                        with progress_container:
+                            st.info("💡 에이전트들이 순차적으로 실행됩니다. 잠시만 기다려 주세요.")
+                            progress_bar = st.progress(0)
+                            status_grid = st.empty()
+                            
+                            # 초기 상태 데이터프레임
+                            status_data = []
+                            for provider in ["OpenAI", "Anthropic", "Google"]:
+                                for i in range(1, 4):
+                                    status_data.append({
+                                        "내용": f"{provider}-{i}",
+                                        "상태": "⏳ 대기 중",
+                                        "상세": "-"
+                                    })
+                            df_status = pd.DataFrame(status_data)
+                            status_grid.table(df_status)
+
+                        # 상태 업데이트 콜백 함수
+                        def update_agent_status(agent_id, provider, status, message):
+                            # 아이콘 설정
+                            icon = "⏳" if status == "waiting" else "🔄" if status == "running" else "✅" if status == "success" else "❌"
+                            idx = df_status[df_status["내용"] == f"{provider}-{agent_id}"].index[0]
+                            df_status.at[idx, "상태"] = f"{icon} {status.upper()}"
+                            df_status.at[idx, "상세"] = message
+                            
+                            # UI 업데이트
+                            status_grid.table(df_status)
+                            
+                            # 전체 진행률 업데이트
+                            completed = len(df_status[df_status["상태"].str.contains("✅|❌")])
+                            progress_bar.progress(completed / 9)
+
                         # 에이전트 실행
                         orchestrator = AgentOrchestrator(api_keys)
+                        num_fields = len(schema["fields"])
                         
-                        # asyncio 이벤트 루프 실행
-                        all_results = asyncio.run(orchestrator.run_all_agents(prompt))
+                        # asyncio 이벤트 루프 실행 (콜백 및 항목 수 전달)
+                        all_results = asyncio.run(orchestrator.run_all_agents(
+                            prompts, 
+                            status_callback=update_agent_status,
+                            total_fields=num_fields
+                        ))
                         st.session_state.all_results = all_results
                         
                         exec_info = all_results["execution_info"]
