@@ -216,7 +216,9 @@ class ResultsDisplay:
         df_final = pd.DataFrame(final_data_list)
         st.dataframe(df_final, use_container_width=True, hide_index=True)
         
-        # JSON 다운로드
+        # 다운로드 데이터 준비
+        import io
+        
         st.subheader("💾 결과 다운로드")
         
         col1, col2 = st.columns(2)
@@ -232,13 +234,17 @@ class ResultsDisplay:
             )
         
         with col2:
-            # CSV 다운로드
-            csv_data = df_final.to_csv(index=False, encoding='utf-8-sig')
+            # Excel 다운로드
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df_final.to_excel(writer, index=False, sheet_name='추출결과')
+            
+            excel_data = output.getvalue()
             st.download_button(
-                label="📥 CSV 다운로드 (값+근거)",
-                data=csv_data,
-                file_name="extraction_result_with_source.csv",
-                mime="text/csv"
+                label="📥 Excel 다운로드 (값+근거)",
+                data=excel_data,
+                file_name="extraction_result_with_source.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
     
     @staticmethod
