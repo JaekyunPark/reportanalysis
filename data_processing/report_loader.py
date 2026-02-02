@@ -36,7 +36,9 @@ class ReportLoader:
                 for page_num, page in enumerate(pdf_reader.pages, 1):
                     text = page.extract_text()
                     if text.strip():
-                        text_content.append(text)
+                        # 페이지 마커 삽입
+                        page_text = f"[PAGE {page_num}] {text}"
+                        text_content.append(page_text)
                     
                     if page_num % 10 == 0:
                         logger.info(f"{page_num}/{total_pages} 페이지 처리 완료")
@@ -44,6 +46,7 @@ class ReportLoader:
             full_text = "\n\n".join(text_content)
             logger.info(f"PDF 로드 완료: {len(full_text)} 문자")
             
+            # 페이지 마커가 보존되도록 전처리 전 호출
             return ReportLoader._preprocess_text(full_text)
             
         except Exception as e:

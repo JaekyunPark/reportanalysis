@@ -42,11 +42,17 @@ class ExcelParser:
             df = pd.read_excel(file_path)
             
             # 컬럼명 확인
-            required_columns = list(EXCEL_COLUMNS.values())
+            required_columns = [
+                EXCEL_COLUMNS["field_name"],
+                EXCEL_COLUMNS["description"]
+            ]
             missing_columns = [col for col in required_columns if col not in df.columns]
             
             if missing_columns:
                 raise ValueError(f"필수 컬럼이 누락되었습니다: {missing_columns}")
+            
+            # 대분류 컬럼 존재 여부 확인
+            has_category = EXCEL_COLUMNS["category"] in df.columns
             
             # 스키마 구성
             fields = []
@@ -55,7 +61,13 @@ class ExcelParser:
                 if pd.isna(row[EXCEL_COLUMNS["field_name"]]):
                     continue
                 
+                # 대분류 값 추출 (없으면 None)
+                category = None
+                if has_category and pd.notna(row[EXCEL_COLUMNS["category"]]):
+                    category = str(row[EXCEL_COLUMNS["category"]]).strip()
+                
                 field = {
+                    "category": category,
                     "name": str(row[EXCEL_COLUMNS["field_name"]]).strip(),
                     "description": str(row[EXCEL_COLUMNS["description"]]).strip() if pd.notna(row[EXCEL_COLUMNS["description"]]) else "",
                     "data_type": str(row[EXCEL_COLUMNS["data_type"]]).strip() if pd.notna(row[EXCEL_COLUMNS["data_type"]]) else "텍스트",

@@ -26,6 +26,7 @@ CROSS_MODEL_WEIGHT = 0.6  # 모델 간 합의 가중치
 
 # 엑셀 스키마 컬럼명
 EXCEL_COLUMNS = {
+    "category": "대분류",
     "field_name": "필드명",
     "description": "설명",
     "data_type": "데이터타입",

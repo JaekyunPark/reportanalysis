@@ -172,12 +172,16 @@ with tab1:
                         )
                     
                     with st.spinner("🔍 결과 검증 및 비교 중..."):
+                        # 필드 순서 추출
+                        field_order = [f["name"] for f in schema["fields"]]
+                        
                         # 결과 검증
-                        final_result = ResultValidator.aggregate_final_result(all_results)
+                        final_result = ResultValidator.aggregate_final_result(all_results, field_order=field_order)
                         comparison = ResultValidator.compare_cross_model_results(
                             all_results["openai_results"],
                             all_results["anthropic_results"],
-                            all_results["google_results"]
+                            all_results["google_results"],
+                            field_order=field_order
                         )
                         
                         st.success("✅ 검증 완료")

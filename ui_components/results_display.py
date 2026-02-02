@@ -74,10 +74,7 @@ class ResultsDisplay:
     @staticmethod
     def display_comparison_table(comparison: Dict[str, Any]):
         """
-        모델 간 비교 테이블 표시
-        
-        Args:
-            comparison: compare_cross_model_results의 결과
+        모델 간 비교 테이블 표시 (값 위주로 비교)
         """
         st.header("🔍 모델 간 비교 분석")
         
@@ -103,7 +100,7 @@ class ResultsDisplay:
         st.divider()
         
         # 필드별 비교 테이블
-        st.subheader("필드별 상세 비교")
+        st.subheader("필드별 상세 비교 (값 기준)")
         
         comparison_data = []
         for field, comp in comparison["field_comparison"].items():
@@ -132,10 +129,7 @@ class ResultsDisplay:
     @staticmethod
     def display_final_results(final_result: Dict[str, Any]):
         """
-        최종 검증된 결과 표시
-        
-        Args:
-            final_result: aggregate_final_result의 결과
+        최종 검증된 결과 표시 (값 및 근거 포함)
         """
         st.header("✅ 최종 검증 결과")
         
@@ -146,15 +140,11 @@ class ResultsDisplay:
             confidence = final_result["overall_confidence"]
             grade = final_result["confidence_grade"]
             
-            # 신뢰도에 따른 색상
             if grade == "높음":
-                delta_color = "normal"
                 emoji = "🟢"
             elif grade == "중간":
-                delta_color = "off"
                 emoji = "🟡"
             else:
-                delta_color = "inverse"
                 emoji = "🔴"
             
             st.metric(
@@ -184,10 +174,12 @@ class ResultsDisplay:
         st.divider()
         
         # 최종 데이터 테이블
-        st.subheader("📋 최종 추출 데이터")
+        st.subheader("📋 최종 추출 데이터 및 근거")
         
         final_data_list = []
-        for field, value in final_result["final_data"].items():
+        download_data = {} # 다운로드용 클린 데이터
+        
+        for field, obj in final_result["final_data"].items():
             confidence = final_result["field_confidence"].get(field, 0)
             
             # 신뢰도 표시
@@ -198,12 +190,28 @@ class ResultsDisplay:
             else:
                 conf_badge = "🔴 낮음"
             
+            # 값과 소스 추출
+            value = None
+            source = None
+            if isinstance(obj, dict):
+                value = obj.get("value")
+                source = obj.get("source")
+            else:
+                value = obj
+            
             final_data_list.append({
                 "필드명": field,
                 "추출값": str(value) if value is not None else "-",
+                "근거/위치": str(source) if source else "-",
                 "신뢰도": f"{confidence:.1%}",
                 "등급": conf_badge
             })
+            
+            download_data[field] = {
+                "value": value,
+                "source": source,
+                "confidence": confidence
+            }
         
         df_final = pd.DataFrame(final_data_list)
         st.dataframe(df_final, use_container_width=True, hide_index=True)
@@ -215,11 +223,11 @@ class ResultsDisplay:
         
         with col1:
             # JSON 다운로드
-            json_str = json.dumps(final_result["final_data"], ensure_ascii=False, indent=2)
+            json_str = json.dumps(download_data, ensure_ascii=False, indent=2)
             st.download_button(
-                label="📥 JSON 다운로드",
+                label="📥 JSON 다운로드 (값+근거)",
                 data=json_str,
-                file_name="extraction_result.json",
+                file_name="extraction_result_with_source.json",
                 mime="application/json"
             )
         
@@ -227,9 +235,9 @@ class ResultsDisplay:
             # CSV 다운로드
             csv_data = df_final.to_csv(index=False, encoding='utf-8-sig')
             st.download_button(
-                label="📥 CSV 다운로드",
+                label="📥 CSV 다운로드 (값+근거)",
                 data=csv_data,
-                file_name="extraction_result.csv",
+                file_name="extraction_result_with_source.csv",
                 mime="text/csv"
             )
     
