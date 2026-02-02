@@ -43,18 +43,35 @@ class GoogleClient(BaseLLMClient):
             # Gemini에게 JSON 형식 요청 추가
             enhanced_prompt = f"{prompt}\n\n반드시 순수한 JSON 형식으로만 응답하세요. 다른 설명이나 텍스트 없이 JSON만 출력하세요."
             
+            # 안전 설정 (데이터 분석 목적이므로 필터링 완화)
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+            ]
+            
             # Gemini는 동기 API이므로 asyncio.to_thread로 비동기 처리
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     self.model.generate_content,
                     enhanced_prompt,
                     generation_config={
-                        "temperature": 0.1,  # 일관성을 위해 낮은 temperature
+                        "temperature": 0.1,
                         "max_output_tokens": 4096,
-                    }
+                    },
+                    safety_settings=safety_settings
                 ),
                 timeout=API_TIMEOUT
             )
+            
+            # 결과 확인 및 안전 필터 체크
+            if not response.candidates:
+                raise Exception("Google API가 응답 후보를 생성하지 못했습니다.")
+            
+            candidate = response.candidates[0]
+            if candidate.finish_reason == 2: # SAFETY
+                raise Exception("Google API 안전 필터에 의해 응답이 차단되었습니다. (보고서 내용에 민감한 정보가 포함되었을 수 있습니다)")
             
             result_text = response.text
             result_data = self.parse_json_response(result_text)

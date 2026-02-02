@@ -67,7 +67,17 @@ with st.sidebar:
 tab1, tab2 = st.tabs(["📤 파일 업로드 & 분석", "ℹ️ 사용 방법"])
 
 with tab1:
-    # 파일 업로드
+    # 세션 상태 초기화
+    if "final_result" not in st.session_state:
+        st.session_state.final_result = None
+    if "all_results" not in st.session_state:
+        st.session_state.all_results = None
+    if "comparison" not in st.session_state:
+        st.session_state.comparison = None
+    if "exec_info" not in st.session_state:
+        st.session_state.exec_info = None
+
+    # 파일 업로드 (상태 초기화를 위해 콜백 대신 직접 확인)
     col1, col2 = st.columns(2)
     
     with col1:
@@ -80,8 +90,6 @@ with tab1:
         
         if excel_file:
             st.success(f"✅ {excel_file.name} 업로드 완료")
-            file_size = len(excel_file.getvalue()) / (1024 * 1024)
-            st.caption(f"파일 크기: {file_size:.2f} MB")
     
     with col2:
         st.subheader("📄 보고서 파일")
@@ -93,8 +101,6 @@ with tab1:
         
         if report_file:
             st.success(f"✅ {report_file.name} 업로드 완료")
-            file_size = len(report_file.getvalue()) / (1024 * 1024)
-            st.caption(f"파일 크기: {file_size:.2f} MB")
     
     st.divider()
     
@@ -123,6 +129,12 @@ with tab1:
             st.error("❌ 최소 하나 이상의 API 키를 입력해주세요!")
         else:
             try:
+                # 새로운 분석 시작 시 기존 결과 초기화
+                st.session_state.final_result = None
+                st.session_state.all_results = None
+                st.session_state.comparison = None
+                st.session_state.exec_info = None
+
                 # 진행 상황 표시
                 progress_container = st.container()
                 
@@ -164,8 +176,10 @@ with tab1:
                         
                         # asyncio 이벤트 루프 실행
                         all_results = asyncio.run(orchestrator.run_all_agents(prompt))
+                        st.session_state.all_results = all_results
                         
                         exec_info = all_results["execution_info"]
+                        st.session_state.exec_info = exec_info
                         st.success(
                             f"✅ 실행 완료: {exec_info['successful_agents']}/{exec_info['total_agents']} "
                             f"에이전트 성공 ({exec_info['execution_time_seconds']}초)"
@@ -177,56 +191,65 @@ with tab1:
                         
                         # 결과 검증
                         final_result = ResultValidator.aggregate_final_result(all_results, field_order=field_order)
+                        st.session_state.final_result = final_result
+                        
                         comparison = ResultValidator.compare_cross_model_results(
                             all_results["openai_results"],
                             all_results["anthropic_results"],
                             all_results["google_results"],
                             field_order=field_order
                         )
+                        st.session_state.comparison = comparison
                         
                         st.success("✅ 검증 완료")
                 
                 st.divider()
                 st.balloons()
                 
-                # 결과 표시
-                st.header("📈 분석 결과")
-                
-                # 실행 정보
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("총 에이전트", exec_info['total_agents'])
-                with col2:
-                    st.metric("성공", exec_info['successful_agents'], 
-                             delta=f"-{exec_info['failed_agents']}" if exec_info['failed_agents'] > 0 else None)
-                with col3:
-                    st.metric("실행 시간", f"{exec_info['execution_time_seconds']}초")
-                with col4:
-                    st.metric("신뢰도", f"{final_result['overall_confidence']:.1%}")
-                
-                st.divider()
-                
-                # 에러 표시
-                if exec_info['errors']:
-                    ResultsDisplay.display_error_status(exec_info['errors'])
-                    st.divider()
-                
-                # 최종 결과
-                ResultsDisplay.display_final_results(final_result)
-                
-                st.divider()
-                
-                # 모델 간 비교
-                ResultsDisplay.display_comparison_table(comparison)
-                
-                st.divider()
-                
-                # 에이전트별 결과
-                ResultsDisplay.display_agent_results_grid(all_results)
-                
             except Exception as e:
                 st.error(f"❌ 오류 발생: {str(e)}")
                 st.exception(e)
+
+    # 결과 표시 (세션 상태에 결과가 있는 경우 실행 여부와 관계없이 표시)
+    if st.session_state.final_result and st.session_state.exec_info:
+        final_result = st.session_state.final_result
+        all_results = st.session_state.all_results
+        comparison = st.session_state.comparison
+        exec_info = st.session_state.exec_info
+
+        st.header("📈 분석 결과")
+        
+        # 실행 정보
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("총 에이전트", exec_info['total_agents'])
+        with col2:
+            st.metric("성공", exec_info['successful_agents'], 
+                     delta=f"-{exec_info['failed_agents']}" if exec_info['failed_agents'] > 0 else None)
+        with col3:
+            st.metric("실행 시간", f"{exec_info['execution_time_seconds']}초")
+        with col4:
+            st.metric("신뢰도", f"{final_result['overall_confidence']:.1%}")
+        
+        st.divider()
+        
+        # 에러 표시
+        if exec_info['errors']:
+            ResultsDisplay.display_error_status(exec_info['errors'])
+            st.divider()
+        
+        # 최종 결과
+        ResultsDisplay.display_final_results(final_result)
+        
+        st.divider()
+        
+        # 모델 간 비교
+        ResultsDisplay.display_comparison_table(comparison)
+        
+        st.divider()
+        
+        # 에이전트별 결과
+        ResultsDisplay.display_agent_results_grid(all_results)
 
 with tab2:
     st.header("📖 사용 방법")
