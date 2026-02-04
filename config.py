@@ -1,14 +1,24 @@
 """
 멀티-LLM 보고서 분석 시스템 설정
 """
+import os
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
+
+
 
 # 모델 설정
 OPENAI_MODEL = "gpt-5.2"
 ANTHROPIC_MODEL = "claude-sonnet-4-5"
-GOOGLE_MODEL = "gemini-3-flash-preview"
+GOOGLE_MODEL = "gemini-3-pro-preview"
 
-# 각 모델별 에이전트 수
-AGENTS_PER_MODEL = 3
+# 각 모델별 기본 에이전트 수
+OPENAI_DEFAULT_AGENTS = int(os.getenv("OPENAI_AGENTS", 3))
+ANTHROPIC_DEFAULT_AGENTS = int(os.getenv("ANTHROPIC_AGENTS", 3))
+GOOGLE_DEFAULT_AGENTS = int(os.getenv("GOOGLE_AGENTS", 3))
+
 
 # API 설정
 API_TIMEOUT = 300  # 초 (긴 보고서 분석을 위해 연장)
@@ -38,3 +48,9 @@ SUPPORTED_DATA_TYPES = ["텍스트", "숫자", "날짜", "불린", "리스트"]
 
 # UI 설정
 MAX_FILE_SIZE_MB = 50  # 최대 파일 크기 (MB)
+
+# 파일 경로 설정
+DEFAULT_SCHEMA_FILE = "항목파일_0129.xlsx"
+
+# 에이전트 워치독 설정 (초)
+GOOGLE_STUCK_TIMEOUT = 300  # 5분 동안 0%면 포기

@@ -38,6 +38,7 @@ class OpenAIClient(BaseLLMClient):
         Returns:
             추출된 데이터 딕셔너리
         """
+        try:
             # 스트리밍 요청 및 처리 전체를 타임아웃으로 감싸기
             async def process_openai_stream():
                 response_stream = await self.client.chat.completions.create(
@@ -74,7 +75,7 @@ class OpenAIClient(BaseLLMClient):
                 return full_text_local
 
             full_text = await asyncio.wait_for(process_openai_stream(), timeout=API_TIMEOUT)
-            result_data = self.parse_json_response(full_text)
+            result_data = await asyncio.to_thread(self.parse_json_response, full_text)
             
             logger.info(f"[{self.get_agent_info()['full_name']}] 데이터 추출 완료")
             

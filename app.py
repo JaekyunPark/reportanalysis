@@ -12,7 +12,13 @@ from pathlib import Path
 from data_processing import ExcelParser, ReportLoader, PromptBuilder
 from agents import AgentOrchestrator, ResultValidator
 from ui_components import ResultsDisplay
-from config import MAX_FILE_SIZE_MB, OPENAI_MODEL, ANTHROPIC_MODEL, GOOGLE_MODEL
+from utils.analysis_manager import AnalysisManager
+from config import (
+    MAX_FILE_SIZE_MB, OPENAI_MODEL, ANTHROPIC_MODEL, GOOGLE_MODEL,
+    OPENAI_DEFAULT_AGENTS, ANTHROPIC_DEFAULT_AGENTS, GOOGLE_DEFAULT_AGENTS,
+    DEFAULT_SCHEMA_FILE
+)
+
 
 # 페이지 설정
 st.set_page_config(
@@ -31,39 +37,51 @@ st.divider()
 with st.sidebar:
     st.header("⚙️ 설정")
     
-    st.subheader("🔑 API 키")
+    with st.expander("🔑 API 키 재설정 (선택 사항)"):
+        openai_key = st.text_input(
+            "OpenAI API Key",
+            value=os.getenv("OPENAI_API_KEY", ""),
+            type="password",
+            help=f"GPT 모델 사용: {OPENAI_MODEL}"
+        )
+        
+        anthropic_key = st.text_input(
+            "Anthropic API Key",
+            value=os.getenv("ANTHROPIC_API_KEY", ""),
+            type="password",
+            help=f"Claude 모델 사용: {ANTHROPIC_MODEL}"
+        )
+        
+        google_key = st.text_input(
+            "Google API Key",
+            value=os.getenv("GOOGLE_API_KEY", ""),
+            type="password",
+            help=f"Gemini 모델 사용: {GOOGLE_MODEL}"
+        )
+
     
-    openai_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        help=f"GPT 모델 사용: {OPENAI_MODEL}"
-    )
+    st.divider()
     
-    anthropic_key = st.text_input(
-        "Anthropic API Key",
-        type="password",
-        help=f"Claude 모델 사용: {ANTHROPIC_MODEL}"
-    )
+    st.subheader("👥 에이전트 수 설정")
     
-    google_key = st.text_input(
-        "Google API Key",
-        type="password",
-        help=f"Gemini 모델 사용: {GOOGLE_MODEL}"
-    )
+    openai_agents = st.slider("OpenAI 에이전트", 0, 5, OPENAI_DEFAULT_AGENTS)
+    anthropic_agents = st.slider("Anthropic 에이전트", 0, 5, ANTHROPIC_DEFAULT_AGENTS)
+    google_agents = st.slider("Google 에이전트", 0, 5, GOOGLE_DEFAULT_AGENTS)
+    
+    total_agents = openai_agents + anthropic_agents + google_agents
     
     st.divider()
     
     st.subheader("📊 모델 정보")
     st.info(f"""
     **사용 모델:**
-    - 🤖 OpenAI: {OPENAI_MODEL}
-    - 🧠 Anthropic: {ANTHROPIC_MODEL}
-    - ✨ Google: {GOOGLE_MODEL}
+    - 🤖 OpenAI: {OPENAI_MODEL} ({openai_agents}개)
+    - 🧠 Anthropic: {ANTHROPIC_MODEL} ({anthropic_agents}개)
+    - ✨ Google: {GOOGLE_MODEL} ({google_agents}개)
     
-    **에이전트 구성:**
-    - 각 모델당 3개 에이전트
-    - 총 9개 병렬 실행
+    **총 에이전트:** {total_agents}개 병렬 실행
     """)
+
 
 # 메인 영역
 tab1, tab2 = st.tabs(["📤 파일 업로드 & 분석", "ℹ️ 사용 방법"])
@@ -78,6 +96,22 @@ with tab1:
         st.session_state.comparison = None
     if "exec_info" not in st.session_state:
         st.session_state.exec_info = None
+    if "batch_results" not in st.session_state:
+        st.session_state.batch_results = []
+    if "batch_file_path" not in st.session_state:
+        st.session_state.batch_file_path = None
+    if "cancelled_agents" not in st.session_state:
+        st.session_state.cancelled_agents = []
+    if "analysis_active" not in st.session_state:
+        st.session_state.analysis_active = False
+    if "current_file_idx" not in st.session_state:
+        st.session_state.current_file_idx = 0
+    if "analysis_managers" not in st.session_state:
+        st.session_state.analysis_managers = {} # {file_idx: AnalysisManager}
+    if "schema" not in st.session_state:
+        st.session_state.schema = None
+    if "api_keys" not in st.session_state:
+        st.session_state.api_keys = {}
 
     # 파일 업로드 (상태 초기화를 위해 콜백 대신 직접 확인)
     col1, col2 = st.columns(2)
@@ -92,12 +126,15 @@ with tab1:
         
         if excel_file:
             st.success(f"✅ {excel_file.name} 업로드 완료")
+        elif os.path.exists(DEFAULT_SCHEMA_FILE):
+            st.info(f"ℹ️ 기본 설정 파일 사용 가능: {DEFAULT_SCHEMA_FILE}")
     
     with col2:
         st.subheader("📄 보고서 파일")
         report_file = st.file_uploader(
             "분석할 보고서 파일을 업로드하세요",
             type=['pdf', 'txt'],
+            accept_multiple_files=False,
             help=f"최대 {MAX_FILE_SIZE_MB}MB까지 업로드 가능"
         )
         
@@ -113,7 +150,7 @@ with tab1:
             "🚀 분석 실행",
             type="primary",
             use_container_width=True,
-            disabled=not (excel_file and report_file)
+            disabled=not ((excel_file or os.path.exists(DEFAULT_SCHEMA_FILE)) and report_file)
         )
     
     # 분석 실행
@@ -131,135 +168,265 @@ with tab1:
             st.error("❌ 최소 하나 이상의 API 키를 입력해주세요!")
         else:
             try:
-                # 새로운 분석 시작 시 기존 결과 초기화
+                # API 키 세션 저장
+                st.session_state.api_keys = api_keys
+                
+                # 새로운 분석 시작 시 기존 결과 초기화 및 상태 설정
                 st.session_state.final_result = None
                 st.session_state.all_results = None
                 st.session_state.comparison = None
                 st.session_state.exec_info = None
-
-                # 진행 상황 표시
-                progress_container = st.container()
+                st.session_state.batch_results = []
+                st.session_state.batch_file_path = None
+                st.session_state.cancelled_agents = []
+                st.session_state.current_file_idx = 0
                 
-                with progress_container:
-                    with st.spinner("📊 엑셀 스키마 로드 중..."):
-                        # 임시 파일로 저장
+                # 1. 스키마 로드
+                with st.spinner("📊 엑셀 스키마 로드 중..."):
+                    if excel_file:
                         temp_excel_path = f"temp_{excel_file.name}"
                         with open(temp_excel_path, "wb") as f:
                             f.write(excel_file.getvalue())
-                        
-                        schema = ExcelParser.load_extraction_schema(temp_excel_path)
+                        st.session_state.schema = ExcelParser.load_extraction_schema(temp_excel_path)
                         os.remove(temp_excel_path)
-                        
-                        st.success(f"✅ 스키마 로드 완료: {schema['total_fields']}개 필드")
+                    else:
+                        st.session_state.schema = ExcelParser.load_extraction_schema(DEFAULT_SCHEMA_FILE)
                     
-                    with st.spinner("📄 보고서 로드 중..."):
-                        # 임시 파일로 저장
+                    st.success(f"✅ 스키마 로드 완료: {st.session_state.schema['total_fields']}개 필드")
+
+                # 분석 활성화
+                st.session_state.analysis_active = True
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 분석 시작 오류: {str(e)}")
+
+    # 2. 분석 실행 로직
+    if st.session_state.analysis_active and report_file and st.session_state.schema:
+        try:
+            schema = st.session_state.schema
+            file_idx = 0 # 단일 파일이므로 0 고정
+            
+            progress_container = st.container()
+            with progress_container:
+                # 매니저가 없으면 생성 및 시작
+                if file_idx not in st.session_state.analysis_managers:
+                    # 보고서 로드
+                    with st.spinner(f"📄 [{report_file.name}] 로드 중..."):
                         temp_report_path = f"temp_{report_file.name}"
                         with open(temp_report_path, "wb") as f:
                             f.write(report_file.getvalue())
                         
-                        # 파일 형식에 따라 로드
                         if report_file.name.endswith('.pdf'):
                             report_text = ReportLoader.load_pdf(temp_report_path)
                         else:
                             report_text = ReportLoader.load_text(temp_report_path)
-                        
                         os.remove(temp_report_path)
                         
-                        st.success(f"✅ 보고서 로드 완료: {len(report_text)} 문자")
-                    
-                    with st.spinner("🔨 추출 프롬프트 생성 중..."):
-                        # 모델별 프롬프트 분리 생성
-                        default_prompt = PromptBuilder.build_extraction_prompt(schema, report_text, model_type="default")
-                        google_prompt = PromptBuilder.build_extraction_prompt(schema, report_text, model_type="google")
+                        # 프롬프트 생성
+                        with st.spinner(f"🔨 [{report_file.name}] 프롬프트 생성 중..."):
+                            default_prompt = PromptBuilder.build_extraction_prompt(schema, report_text, model_type="default")
+                            google_prompt = PromptBuilder.build_extraction_prompt(schema, report_text, model_type="google")
+                            prompts = {"default": default_prompt, "google": google_prompt}
                         
-                        prompts = {
-                            "default": default_prompt,
-                            "google": google_prompt
-                        }
-                        st.success("✅ 모델별 최적화 프롬프트 생성 완료")
-                    
-                    with st.spinner("🤖 9개 에이전트 실행 중... (시간이 소요될 수 있습니다)"):
-                        # 실시간 진행 상황 표시를 위한 컨테이너
-                        progress_container = st.container()
-                        with progress_container:
-                            st.info("💡 에이전트들이 순차적으로 실행됩니다. 잠시만 기다려 주세요.")
-                            progress_bar = st.progress(0)
-                            status_grid = st.empty()
-                            
-                            # 초기 상태 데이터프레임
-                            status_data = []
-                            for provider in ["OpenAI", "Anthropic", "Google"]:
-                                for i in range(1, 4):
-                                    status_data.append({
-                                        "내용": f"{provider}-{i}",
-                                        "상태": "⏳ 대기 중",
-                                        "상세": "-"
-                                    })
-                            df_status = pd.DataFrame(status_data)
-                            status_grid.table(df_status)
-
-                        # 상태 업데이트 콜백 함수
-                        def update_agent_status(agent_id, provider, status, message):
-                            # 아이콘 설정
-                            icon = "⏳" if status == "waiting" else "🔄" if status == "running" else "✅" if status == "success" else "❌"
-                            idx = df_status[df_status["내용"] == f"{provider}-{agent_id}"].index[0]
-                            df_status.at[idx, "상태"] = f"{icon} {status.upper()}"
-                            df_status.at[idx, "상세"] = message
-                            
-                            # UI 업데이트
-                            status_grid.table(df_status)
-                            
-                            # 전체 진행률 업데이트
-                            completed = len(df_status[df_status["상태"].str.contains("✅|❌")])
-                            progress_bar.progress(completed / 9)
-
-                        # 에이전트 실행
-                        orchestrator = AgentOrchestrator(api_keys)
-                        num_fields = len(schema["fields"])
-                        
-                        # asyncio 이벤트 루프 실행 (콜백 및 항목 수 전달)
-                        all_results = asyncio.run(orchestrator.run_all_agents(
-                            prompts, 
-                            status_callback=update_agent_status,
-                            total_fields=num_fields
-                        ))
-                        st.session_state.all_results = all_results
-                        
-                        exec_info = all_results["execution_info"]
-                        st.session_state.exec_info = exec_info
-                        st.success(
-                            f"✅ 실행 완료: {exec_info['successful_agents']}/{exec_info['total_agents']} "
-                            f"에이전트 성공 ({exec_info['execution_time_seconds']}초)"
-                        )
-                    
-                    with st.spinner("🔍 결과 검증 및 비교 중..."):
-                        # 필드 순서 추출
-                        field_order = [f["name"] for f in schema["fields"]]
-                        
-                        # 결과 검증
-                        final_result = ResultValidator.aggregate_final_result(all_results, field_order=field_order)
-                        st.session_state.final_result = final_result
-                        
-                        comparison = ResultValidator.compare_cross_model_results(
-                            all_results["openai_results"],
-                            all_results["anthropic_results"],
-                            all_results["google_results"],
-                            field_order=field_order
-                        )
-                        st.session_state.comparison = comparison
-                        
-                        st.success("✅ 검증 완료")
+                        manager = AnalysisManager(st.session_state.api_keys)
+                        manager.report_char_count = len(report_text)
+                        manager.start_analysis(prompts, {"openai": openai_agents, "anthropic": anthropic_agents, "google": google_agents}, schema)
+                        st.session_state.analysis_managers[file_idx] = manager
                 
-                st.divider()
-                st.balloons()
+                manager = st.session_state.analysis_managers[file_idx]
                 
-            except Exception as e:
-                st.error(f"❌ 오류 발생: {str(e)}")
-                st.exception(e)
+                # 보고서 정보 표시
+                if manager.report_char_count > 0:
+                    st.info(f"📄 보고서 읽기 완료: 약 {manager.report_char_count}자")
+
+                # 상태 표시 및 폴링
+                st.subheader("🤖 에이전트 분석 진행 상황")
+                status_grid = st.empty()
+                progress_bar = st.progress(0)
+
+                # 상태 업데이트 루프 (폴링)
+                import time
+                while manager.is_running:
+                    manager_info = manager.get_status()
+                    status_data = []
+                    completed_count = 0
+                    
+                    providers_config = [("OpenAI", openai_agents), ("Anthropic", anthropic_agents), ("Google", google_agents)]
+                    for provider, count in providers_config:
+                        for i in range(1, count + 1):
+                            status_info = manager_info["agent_statuses"].get((provider, i), {"status": "waiting", "message": "대기 중"})
+                            s = status_info["status"]
+                            icon = "⏳" if s == "waiting" else "🔄" if s == "running" else "✅" if s == "success" else "❌"
+                            if s in ["success", "error", "cancelled"]:
+                                completed_count += 1
+                            status_data.append({"내용": f"{provider}-{i}", "상태": f"{icon} {s.upper()}", "상세": status_info["message"]})
+                    
+                    df_status = pd.DataFrame(status_data)
+                    status_grid.table(df_status)
+                    total_requested = openai_agents + anthropic_agents + google_agents
+                    if total_requested > 0:
+                        progress_bar.progress(min(completed_count / total_requested, 1.0))
+                        
+                    # 결과가 이미 나왔으면 루프 종료
+                    if manager_info["results"]:
+                        break
+                        
+                    # 짧은 대기 후 새로고침 유도 (사용자 경험 개선)
+                    time.sleep(1)
+                    # st.rerun()을 호출하면 좋으나 루프를 빠져나가게 되므로 
+                    # Streamlit의 empty 컨테이너 업데이트로 충분함.
+
+                # 최종 결과 수집
+                all_results = manager.results
+
+                # 결과 검증
+                with st.spinner(f"🔍 [{report_file.name}] 결과 검증 중..."):
+                    field_order = [f["name"] for f in schema["fields"]]
+                    final_result = ResultValidator.aggregate_final_result(all_results, field_order=field_order)
+                    final_result["file_name"] = report_file.name # 파일명 추가
+                    
+                    comparison = ResultValidator.compare_cross_model_results(
+                        all_results["openai_results"], all_results["anthropic_results"], all_results["google_results"],
+                        field_order=field_order
+                    )
+                    
+                    # 개별 파일 결과 자동 저장
+                    individual_file_path = ExcelParser.save_individual_result(final_result)
+                    
+                    # 분석 결과 저장
+                    st.session_state.final_result = final_result
+                    st.session_state.all_results = all_results
+                    st.session_state.comparison = comparison
+                    st.session_state.exec_info = all_results["execution_info"]
+                    st.session_state.batch_results = [{
+                        "file_name": report_file.name,
+                        "final_result": final_result,
+                        "all_results": all_results,
+                        "comparison": comparison,
+                        "exec_info": all_results["execution_info"],
+                        "file_path": individual_file_path
+                    }]
+                    
+                    # 매니저 삭제 및 상태 해제
+                    del st.session_state.analysis_managers[file_idx]
+                    st.session_state.analysis_active = False
+                    
+                    # 풍선 효과
+                    st.balloons()
+                st.rerun()
+
+        except Exception as e:
+            st.error(f"❌ 분석 과정 오류: {str(e)}")
+            st.session_state.analysis_active = False
+            st.rerun()
 
     # 결과 표시 (세션 상태에 결과가 있는 경우 실행 여부와 관계없이 표시)
-    if st.session_state.final_result and st.session_state.exec_info:
+    if st.session_state.batch_results:
+        st.header("📋 배치 분석 요약")
+        
+        # 통합 엑셀 다운로드 버튼
+        if st.session_state.batch_file_path and os.path.exists(st.session_state.batch_file_path):
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                with open(st.session_state.batch_file_path, "rb") as f:
+                    st.download_button(
+                        label="📥 통합 결과 엑셀 다운로드",
+                        data=f,
+                        file_name=os.path.basename(st.session_state.batch_file_path),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+            with col2:
+                st.info("💡 각 파일별 결과도 아래 목록에서 개별적으로 다운로드할 수 있습니다.")
+        
+        # 파일별 요약 테이블 및 개별 다운로드
+        summary_data = []
+        for res_entry in st.session_state.batch_results:
+            res = res_entry["final_result"]
+            summary_data.append({
+                "파일명": res_entry.get("file_name", "unknown"),
+                "평균 신뢰도": f"{res.get('overall_confidence', 0):.1%}",
+                "신뢰도 등급": res.get("confidence_grade", "-"),
+                "결과 파일": os.path.basename(res_entry.get("output_path", "-")) if res_entry.get("output_path") else "-"
+            })
+        
+        st.subheader("📁 파일별 분석 요약 및 다운로드")
+        
+        # 테이블 대신 컬럼으로 다운로드 버튼 배치
+        for res_entry in st.session_state.batch_results:
+            res = res_entry["final_result"]
+            with st.container():
+                col1, col2, col3, col4 = st.columns([3, 1, 1, 2])
+                with col1:
+                    st.write(f"📄 **{res_entry.get('file_name')}**")
+                with col2:
+                    st.write(f"{res.get('overall_confidence', 0):.1%}")
+                with col3:
+                    st.write(res.get('confidence_grade'))
+                with col4:
+                    output_path = res_entry.get("output_path")
+                    if output_path and os.path.exists(output_path):
+                        with open(output_path, "rb") as f:
+                            st.download_button(
+                                label="📥 다운로드",
+                                data=f,
+                                file_name=os.path.basename(output_path),
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"dl_{res_entry.get('file_name')}"
+                            )
+                st.divider()
+        
+        st.divider()
+        
+        # 개별 파일 상세 결과 선택
+        st.subheader("🔍 개별 파일 상세 결과 확인")
+        selected_file_name = st.selectbox(
+            "상세 정보 확인을 위한 파일을 선택하세요",
+            options=[res["file_name"] for res in st.session_state.batch_results]
+        )
+        
+        # 선택된 파일의 결과 찾기
+        selected_entry = next((res for res in st.session_state.batch_results if res["file_name"] == selected_file_name), None)
+        
+        if selected_entry:
+            # 상세 정보 표시
+            # 1. 실행 요약 (유저 요청 복구)
+            st.subheader("📊 에이전트 실행 요약")
+            exec_info = selected_entry.get("exec_info", {})
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("총 에이전트", f"{exec_info.get('total_agents', 0)}개")
+            with col2:
+                st.metric("성공", f"{exec_info.get('successful_agents', 0)}개", delta_color="normal")
+            with col3:
+                st.metric("실패", f"{exec_info.get('failed_agents', 0)}개", delta_color="inverse" if exec_info.get('failed_agents', 0) > 0 else "normal")
+            with col4:
+                st.metric("실행 시간", f"{exec_info.get('execution_time_seconds', 0)}초")
+            
+            # 모델별 성공 카운트
+            st.write(f"✅ 모델별 성공: OpenAI ({exec_info.get('openai_count', 0)}) | Anthropic ({exec_info.get('anthropic_count', 0)}) | Google ({exec_info.get('google_count', 0)})")
+            
+            # 에러 발생 시 로그 표시
+            if exec_info.get("errors"):
+                ResultsDisplay.display_error_status(exec_info["errors"])
+            
+            st.divider()
+
+            # 최종 결과
+            ResultsDisplay.display_final_results(selected_entry["final_result"])
+            
+            st.divider()
+            
+            # 모델 간 비교
+            ResultsDisplay.display_comparison_table(selected_entry["comparison"])
+            
+            st.divider()
+            
+            # 에이전트별 결과
+            ResultsDisplay.display_agent_results_grid(selected_entry["all_results"])
+
+    elif st.session_state.final_result and st.session_state.exec_info:
         final_result = st.session_state.final_result
         all_results = st.session_state.all_results
         comparison = st.session_state.comparison
@@ -268,15 +435,16 @@ with tab1:
         st.header("📈 분석 결과")
         
         # 실행 정보
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("총 에이전트", exec_info['total_agents'])
         with col2:
-            st.metric("성공", exec_info['successful_agents'], 
-                     delta=f"-{exec_info['failed_agents']}" if exec_info['failed_agents'] > 0 else None)
+            st.metric("성공", exec_info['successful_agents'])
         with col3:
-            st.metric("실행 시간", f"{exec_info['execution_time_seconds']}초")
+            st.metric("실패", exec_info['failed_agents'])
         with col4:
+            st.metric("중단", exec_info.get('cancelled_agents', 0))
+        with col5:
             st.metric("신뢰도", f"{final_result['overall_confidence']:.1%}")
         
         st.divider()

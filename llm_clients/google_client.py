@@ -24,26 +24,22 @@ class GoogleClient(BaseLLMClient):
     def __init__(self, api_key: str, model_name: str, agent_id: int):
         super().__init__(api_key, model_name, agent_id)
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
+        
+        # 시스템 지침 설정
+        system_instruction = "당신은 보고서 데이터 추출 전문가입니다. 반드시 요청된 JSON 구조를 엄격히 준수하여 유효한 JSON 데이터만 응답해야 합니다. 특히 필드 사이의 쉼표(,)를 절대 누락하지 마세요."
+
+        self.model = genai.GenerativeModel(
+            model_name=model_name,
+            system_instruction=system_instruction
+        )
     
     @retry_on_error()
     async def extract_data(self, prompt: str, total_fields: int = 0, progress_callback: Callable = None) -> Dict[str, Any]:
         """
-        Google API를 사용하여 데이터 추출 (완전 비동기 스트리밍 적용)
-        
-        Args:
-            prompt: 추출 프롬프트
-            total_fields: 전체 추출 항목 수
-            progress_callback: 진행 상태보고 콜백
-            
-        Returns:
-            추출된 데이터 딕셔너리
+        Google API를 사용하여 데이터 추출 (JSON 출력 모드 적용)
         """
         try:
-            logger.info(f"[{self.get_agent_info()['full_name']}] 데이터 추출 시작 (비동기 스트리밍)...")
-            
-            # Gemini에게 JSON 형식 요청 (안전 필터를 위해 부드러운 표현 사용)
-            enhanced_prompt = f"{prompt}\n\n응답은 가급적 다른 설명 없이 순수한 JSON 형식으로만 작성해 주세요."
+            logger.info(f"[{self.get_agent_info()['full_name']}] 데이터 추출 시작 (JSON 모드)...")
             
             # 안전 설정
             safety_settings = [
@@ -55,16 +51,19 @@ class GoogleClient(BaseLLMClient):
             
             # 헬퍼 함수: 스트리밍 처리 로직
             async def process_stream():
-                # generate_content_async를 사용하여 비동기 스트리밍 시작
+                # JSON 모드 활성화 및 비동기 스트리밍 시작
                 response_stream = await self.model.generate_content_async(
-                    enhanced_prompt,
+                    prompt,  # enhanced_prompt 대신 원본 prompt 사용 (시스템 지침에서 보완)
                     generation_config={
                         "temperature": 0.1,
-                        "max_output_tokens": 4096,
+                        "max_output_tokens": 16384,
+                        "response_mime_type": "application/json",
                     },
+
                     safety_settings=safety_settings,
                     stream=True
                 )
+
                 
                 full_text = ""
                 last_progress = 0
@@ -95,7 +94,7 @@ class GoogleClient(BaseLLMClient):
             # 스트리밍 과정 전체에 대한 타임아웃 적용
             full_text = await asyncio.wait_for(process_stream(), timeout=API_TIMEOUT)
             
-            result_data = self.parse_json_response(full_text)
+            result_data = await asyncio.to_thread(self.parse_json_response, full_text)
             logger.info(f"[{self.get_agent_info()['full_name']}] 데이터 추출 완료")
             
             return result_data
